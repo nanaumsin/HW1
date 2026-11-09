@@ -3,3 +3,6 @@ __pycache__/
 *.pyc
 
 .env
+
+# 셀프 호스티드 러너 (인증 정보 포함 - 절대 커밋 금지)
+actions-runner/

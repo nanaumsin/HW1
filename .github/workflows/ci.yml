@@ -7,7 +7,8 @@ on:
 
 jobs:
   docker-build-push:
-    runs-on: ubuntu-24.04
+    # 이 PC(BOOK-KV965R9SP0)에 등록한 셀프 호스티드 러너에서 실행 (Docker Desktop 사용)
+    runs-on: self-hosted
 
     steps:
       - name: Checkout repository
