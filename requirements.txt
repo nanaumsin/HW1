@@ -1,5 +1,15 @@
-fastapi
-uvicorn
-transformers
-torch
-pydantic
+# PyTorch CPU 전용 휠 (GPU 휠 대비 이미지 크기 대폭 감소)
+--extra-index-url https://download.pytorch.org/whl/cpu
+
+# Python 3.12.16 에서 검증된 버전으로 고정
+fastapi==0.162.2
+uvicorn==0.54.0
+pydantic==2.14.3
+transformers==5.22.2
+torch==2.15.0+cpu
+
+# 모델 로드에 직접 관여하는 하위 의존성 고정
+huggingface_hub==2.4.0
+tokenizers==0.23.3
+safetensors==0.8.0
+numpy==2.5.4
