@@ -4,5 +4,14 @@ __pycache__/
 
 .env
 
-# 셀프 호스티드 러너 (인증 정보 포함 - 절대 커밋 금지)
+# 셀프 호스티드 러너 설치 파일 및 실행 중 생성 파일 (인증 정보 포함 - 절대 커밋 금지)
 actions-runner/
+actions-runner-*.zip
+actions-runner-*.tar.gz
+_work/
+_diag/
+.runner
+.credentials
+.credentials_rsaparams
+.env.runner
+.path
