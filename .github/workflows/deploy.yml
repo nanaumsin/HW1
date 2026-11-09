@@ -1,7 +1,7 @@
 name: Deploy to Local (Self-hosted)
 
 # CI(Build and Push Docker Image)가 main 에서 성공하면 이 PC 의 self-hosted 러너에서
-# Docker Hub 의 새 이미지를 받아 로컬 컨테이너를 교체한다.
+# 독립 모니터를 먼저 띄운 뒤 blue/green 무중단 배포를 수행하고, 결과를 Summary/Artifact 로 남긴다.
 on:
   workflow_run:
     workflows: ["Build and Push Docker Image"]
@@ -9,20 +9,19 @@ on:
     branches: [main]
   workflow_dispatch:
 
-# 배포는 한 번에 하나씩 (새 배포가 오면 대기)
 concurrency:
   group: local-deploy
   cancel-in-progress: false
 
 env:
   IMAGE: justinhongji/hw1-sentiment
-  CONTAINER: hw1-sentiment
-  HOST_PORT: "8000"
+  SERVICE_URL: http://localhost:8000/predict
+  POST_DEPLOY_MONITOR_SEC: "30"
 
 jobs:
   deploy:
     if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
-    # 러너 환경: Windows x64 + Docker Desktop(Linux 컨테이너), Windows PowerShell 5.1
+    # Windows x64 + Docker Desktop(Linux containers), Windows PowerShell 5.1
     runs-on: [self-hosted, Windows, X64]
     defaults:
       run:
@@ -49,6 +48,11 @@ jobs:
           docker version --format 'Client {{.Client.Version}} / Server {{.Server.Version}} ({{.Server.Os}})'
           if ($LASTEXITCODE -ne 0) { throw "Docker engine is not running. Start Docker Desktop." }
 
+      - name: Checkout deploy scripts
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+
       - name: Log in to Docker Hub
         uses: docker/login-action@v4
         with:
@@ -59,68 +63,91 @@ jobs:
       - name: Pull latest image
         run: |
           $ErrorActionPreference = 'Continue'
-          $sha = '${{ github.event.workflow_run.head_sha }}'
-          $tag = if ($sha) { $sha } else { 'latest' }
-          $ref = "$env:IMAGE`:$tag"
+          $sha = '${{ github.event.workflow_run.head_sha || github.sha }}'
+          $ref = "$env:IMAGE`:$sha"
           Write-Host "Pulling $ref"
           docker pull $ref
           if ($LASTEXITCODE -ne 0) { throw "docker pull failed: $ref" }
+          $logDir = Join-Path $env:RUNNER_TEMP 'deploy-logs'
+          New-Item -ItemType Directory -Force $logDir | Out-Null
           "IMAGE_REF=$ref" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "NEW_VERSION=$sha" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "LOG_DIR=$logDir" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Start independent monitor and confirm healthy baseline
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $log = Join-Path $env:LOG_DIR 'monitor.jsonl'
+          $stop = Join-Path $env:LOG_DIR 'monitor.stop'
+          $args1 = "-NoProfile -ExecutionPolicy Bypass -File `"$env:GITHUB_WORKSPACE\deploy\monitor.ps1`" -Url $env:SERVICE_URL -LogPath `"$log`" -StopFile `"$stop`""
+          $p = Start-Process powershell -ArgumentList $args1 -WindowStyle Hidden -PassThru
+          "MONITOR_PID=$($p.Id)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Write-Host "Monitor started as separate process (PID $($p.Id)) -> $log"
+          # require 5 consecutive successful responses before changing the service
+          $deadline = (Get-Date).AddSeconds(90)
+          while ((Get-Date) -lt $deadline) {
+            Start-Sleep -Seconds 2
+            $recs = @(Get-Content $log -Encoding UTF8 -ErrorAction SilentlyContinue | Where-Object { $_.Trim() } | ForEach-Object { $_ | ConvertFrom-Json })
+            $tail = @($recs | Select-Object -Last 5)
+            if ($tail.Count -eq 5 -and @($tail | Where-Object { $_.ok }).Count -eq 5) {
+              $prev = $tail[-1].version
+              "PREV_VERSION=$prev" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+              Write-Host "Baseline healthy: 5/5 OK, current version $prev"
+              exit 0
+            }
+          }
+          throw "Service is not healthy before deployment (monitor baseline failed)"
 
       - name: Replace running app container
         run: |
           $ErrorActionPreference = 'Continue'
-          # Remember the current image for rollback
-          $old = docker inspect --format '{{.Config.Image}}' $env:CONTAINER 2>$null
-          if ($LASTEXITCODE -eq 0 -and $old) {
-            Write-Host "Previous image: $old"
-            "PREVIOUS_IMAGE=$old" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-            docker rm -f $env:CONTAINER | Out-Null
-          } else {
-            Write-Host "No existing container (first deploy)"
-          }
+          & "$env:GITHUB_WORKSPACE\deploy\deploy.ps1" -ImageRef $env:IMAGE_REF -Version $env:NEW_VERSION -PhaseFile (Join-Path $env:LOG_DIR 'phases.jsonl') 2>&1 |
+            Tee-Object -FilePath (Join-Path $env:LOG_DIR 'deploy.log')
+          $phases = Get-Content (Join-Path $env:LOG_DIR 'phases.jsonl') -Encoding UTF8 -ErrorAction SilentlyContinue | Out-String
+          if ($phases -notmatch '"deploy_end"') { throw "deployment failed (see deploy.log)" }
 
-          docker run -d --name $env:CONTAINER --restart unless-stopped `
-            -p "$($env:HOST_PORT):8000" $env:IMAGE_REF
-          if ($LASTEXITCODE -ne 0) { throw "docker run failed" }
+      - name: Keep monitoring after deployment
+        run: |
+          Write-Host "Monitoring for $env:POST_DEPLOY_MONITOR_SEC more seconds after deployment ..."
+          Start-Sleep -Seconds ([int]$env:POST_DEPLOY_MONITOR_SEC)
 
-      - name: Verify service
+      - name: Stop monitor
+        if: always()
         run: |
           $ErrorActionPreference = 'Continue'
-          $url = "http://localhost:$env:HOST_PORT"
-          $ok = $false
-          for ($i = 1; $i -le 60; $i++) {
-            try {
-              $r = Invoke-WebRequest "$url/" -UseBasicParsing -TimeoutSec 5
-              if ($r.StatusCode -eq 200) { $ok = $true; break }
-            } catch { }
-            Start-Sleep -Seconds 3
+          if ($env:LOG_DIR) {
+            New-Item -ItemType File -Force (Join-Path $env:LOG_DIR 'monitor.stop') | Out-Null
+            if ($env:MONITOR_PID) {
+              $p = Get-Process -Id $env:MONITOR_PID -ErrorAction SilentlyContinue
+              if ($p) { $p.WaitForExit(20000) | Out-Null }
+            }
+            docker logs --tail 200 hw1-proxy 2>&1 | Out-File (Join-Path $env:LOG_DIR 'proxy.log') -Encoding utf8
+            docker ps -a --filter "name=hw1-" --format '{{.Names}} {{.Image}} {{.Status}}' | Out-File (Join-Path $env:LOG_DIR 'containers.txt') -Encoding utf8
           }
-          if (-not $ok) { docker logs --tail 100 $env:CONTAINER; throw "Service did not respond at $url" }
-          Write-Host "GET / -> 200"
 
-          $body = [System.Text.Encoding]::UTF8.GetBytes('{"text": "This is great!"}')
-          $p = Invoke-RestMethod "$url/predict" -Method Post -ContentType 'application/json; charset=utf-8' -Body $body -TimeoutSec 30
-          Write-Host "POST /predict -> label=$($p.label) confidence=$($p.confidence)"
-          docker ps --filter "name=$env:CONTAINER" --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}'
-          Write-Host "Deployed $env:IMAGE_REF -> $url"
-
-      - name: Roll back on failure
-        if: failure()
+      - name: Summarize monitoring results
+        if: always()
         run: |
           $ErrorActionPreference = 'Continue'
-          docker logs --tail 100 $env:CONTAINER 2>&1 | Out-String | Write-Host
-          if ($env:PREVIOUS_IMAGE) {
-            Write-Host "Rolling back to $env:PREVIOUS_IMAGE"
-            docker rm -f $env:CONTAINER | Out-Null
-            docker run -d --name $env:CONTAINER --restart unless-stopped `
-              -p "$($env:HOST_PORT):8000" $env:PREVIOUS_IMAGE
-          }
+          if (-not $env:LOG_DIR) { Write-Host "no logs collected"; exit 0 }
+          & "$env:GITHUB_WORKSPACE\deploy\summarize.ps1" `
+            -MonitorLog (Join-Path $env:LOG_DIR 'monitor.jsonl') `
+            -PhaseFile (Join-Path $env:LOG_DIR 'phases.jsonl') `
+            -OutDir $env:LOG_DIR -Url $env:SERVICE_URL `
+            -ExpectedVersion $env:NEW_VERSION -PreviousVersion $env:PREV_VERSION `
+            -RunUrl "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+
+      - name: Upload monitoring logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: deploy-monitoring-logs
+          path: ${{ runner.temp }}/deploy-logs/
+          if-no-files-found: warn
 
       - name: Clean up old images
         if: success()
         run: |
           $ErrorActionPreference = 'Continue'
-          # Remove only dangling (replaced) images
           docker image prune -f
           docker images $env:IMAGE

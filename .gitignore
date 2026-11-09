@@ -4,6 +4,13 @@ __pycache__/
 
 .env
 
+# 평가 데이터 / 예측 결과 / 캐시 / 검증 로그 (재생성 가능, 커밋 제외)
+mlops/data/
+mlops/results/
+.cache/
+deploy-logs/
+*.jsonl
+
 # 셀프 호스티드 러너 설치 파일 및 실행 중 생성 파일 (인증 정보 포함 - 절대 커밋 금지)
 actions-runner/
 actions-runner-*.zip

@@ -37,12 +37,15 @@ def check_model_and_inference() -> None:
     import app  # 모듈 import 시 pipeline 으로 모델 로드
 
     assert app.nlp_model is not None, "app.nlp_model is None (model failed to load)"
-    print(f"  [OK] model loaded offline: {app.nlp_model.model.name_or_path}")
+    print(f"  [OK] model loaded offline: {app.nlp_model.model_name}")
 
     # 추론이 오류 없이 실행되는지만 확인 (분류 정확도/성능은 검사하지 않음)
-    res = asyncio.run(app.predict(app.TextRequest(text=SAMPLE_TEXT)))
-    assert set(res) == {"text", "label", "sentiment", "confidence"}, res
-    print(f"  [OK] inference runs: {res['label']} ({res['confidence']:.2f})")
+    # 한국어 -> 한국어 모델 경로, 영어 -> 다국어 모델 경로 각각 1회
+    for text in (SAMPLE_TEXT, "This product is amazing."):
+        res = asyncio.run(app.predict(app.TextRequest(text=text)))
+        required = {"text", "label", "sentiment", "confidence", "model", "version"}
+        assert required <= set(res), res
+        print(f"  [OK] inference runs: {res['label']} ({res['confidence']:.2f})")
 
     html = asyncio.run(app.read_index())
     assert html.status_code == 200 and b"<html" in html.body

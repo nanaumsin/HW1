@@ -1,17 +1,31 @@
-from fastapi import FastAPI, HTTPException
+import os
+
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
-from transformers import pipeline
 import uvicorn
+
+from sentiment import SentimentService
+
+# 배포 버전 (컨테이너 실행 시 APP_VERSION=<git sha> 로 주입)
+APP_VERSION = os.environ.get("APP_VERSION", "dev")
 
 app = FastAPI(title="Text Sentiment Analysis API")
 
-# 사전 학습된 다국어 감성 분석 모델 로드 (최초 실행 시 자동 다운로드됨)
+# 감성 분석 모델 로드
+# - 한국어: KoELECTRA 한국어 감성 모델 / 기타 언어: 다국어 nlptown 모델 (mlops/REPORT.md 참고)
 try:
-    nlp_model = pipeline("sentiment-analysis", model="nlptown/bert-base-multilingual-uncased-sentiment")
+    nlp_model = SentimentService()
 except Exception as e:
     nlp_model = None
     print(f"모델 로드 실패: {e}")
+
+
+@app.middleware("http")
+async def add_version_header(request: Request, call_next):
+    response = await call_next(request)
+    response.headers["X-App-Version"] = APP_VERSION
+    return response
 
 class TextRequest(BaseModel):
     text: str
@@ -105,25 +119,16 @@ async def predict(request: TextRequest):
     if not request.text.strip():
         raise HTTPException(status_code=400, detail="텍스트가 비어있습니다.")
     
-    # 모델 추론
-    results = nlp_model(request.text)
-    
-    # 결과 후처리
-    score_str = results[0]['label'].split()[0]
-    score = int(score_str)
-    
-    if score >= 4:
-        sentiment = "긍정적 😊"
-    elif score == 3:
-        sentiment = "중립적 😐"
-    else:
-        sentiment = "부정적 😞"
-        
+    # 모델 추론 (전처리 + 언어별 모델 라우팅 + 판정)
+    result = nlp_model.analyze(request.text)
+
     return {
         "text": request.text,
-        "label": results[0]['label'],
-        "sentiment": sentiment,
-        "confidence": round(results[0]['score'], 4)
+        "label": result["label"],
+        "sentiment": result["sentiment"],
+        "confidence": result["confidence"],
+        "model": nlp_model.model_name,
+        "version": APP_VERSION,
     }
 
 if __name__ == "__main__":

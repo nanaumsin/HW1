@@ -20,7 +20,7 @@ COPY scripts/ scripts/
 RUN python scripts/download_model.py
 
 # 3) 앱 코드
-COPY app.py .
+COPY sentiment.py app.py ./
 
 # 실행 시 인터넷 없이 이미지 내부 모델만 사용
 ENV HF_HUB_OFFLINE=1 \
