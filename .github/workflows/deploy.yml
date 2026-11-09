@@ -26,7 +26,9 @@ jobs:
     runs-on: [self-hosted, Windows, X64]
     defaults:
       run:
-        shell: powershell
+        # Windows default execution policy (Restricted) blocks the runner's .ps1 step scripts,
+        # so bypass it for the step process only (no system-wide policy change).
+        shell: powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command ". '{0}'"
 
     steps:
       - name: Add per-user Docker Desktop CLI to PATH
